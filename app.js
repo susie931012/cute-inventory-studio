@@ -93,7 +93,7 @@ function selected() { return state.categories.find(c => c.id === active); }
 function sorted(items) { return [...items.filter(i => i.image), ...items.filter(i => !i.image)]; }
 function renderEditor() {
   if (!selected()) active = state.categories[0]?.id;
-  $('categories').replaceChildren(...state.categories.map(c => button(c.name, () => { active = c.id; $('search').value = ''; renderEditor(); }, { 'aria-pressed': String(c.id === active) })));
+  $('categories').replaceChildren(...state.categories.map(c => el('div', { class: 'category-sort', 'data-sort-id': c.id, 'data-sort-group': 'category' }, button(c.name, () => { active = c.id; $('search').value = ''; renderEditor(); }, { 'aria-pressed': String(c.id === active) }), button('⠿', () => {}, { class: 'sort-handle', 'data-sort-handle': 'category', 'aria-label': '拖动分类「' + c.name + '」调整顺序', title: '按住拖动排序' }))));
   const cat = selected(); $('activeName').textContent = cat?.name || '还没有分类';
   for (const id of ['addItem', 'batchText', 'batchUpload', 'editCategory', 'search']) $(id).disabled = !cat;
   const idx = state.categories.indexOf(cat); $('categoryUp').disabled = idx <= 0; $('categoryDown').disabled = idx < 0 || idx === state.categories.length - 1;
@@ -112,7 +112,7 @@ function renderItems() {
     const index = group.indexOf(item);
     const up = button('↑', () => moveItem(item.id, -1), { 'aria-label': '前移 ' + item.name, title: '前移' }); up.disabled = index === 0;
     const down = button('↓', () => moveItem(item.id, 1), { 'aria-label': '后移 ' + item.name, title: '后移' }); down.disabled = index === group.length - 1;
-    return el('article', { class: 'item-card' + (!item.image ? ' text-only' : '') }, open, el('div', { class: 'item-controls' }, up, down, button('删除', () => removeItem(item.id), { 'aria-label': '删除 ' + item.name })));
+    return el('article', { class: 'item-card' + (!item.image ? ' text-only' : ''), 'data-sort-id': item.id, 'data-sort-group': item.image ? 'pictured' : 'text' }, open, el('div', { class: 'item-controls' }, button('⠿', () => {}, { class: 'sort-handle', 'data-sort-handle': 'item', 'aria-label': '拖动「' + item.name + '」调整顺序', title: '按住拖动排序' }), up, down, button('删除', () => removeItem(item.id), { 'aria-label': '删除 ' + item.name })));
   }));
 }
 function renderDesign() {
@@ -150,6 +150,61 @@ function removeItem(id) { const cat = selected(), item = cat.items.find(v => v.i
 function moveCategory(delta) {
   const i = state.categories.findIndex(c => c.id === active); if (i < 0 || !state.categories[i + delta]) return;
   commit(s => [s.categories[i], s.categories[i + delta]] = [s.categories[i + delta], s.categories[i]]);
+}
+function wireDragSort(containerId, kind) {
+  const host = $(containerId);
+  let drag = null;
+  host.addEventListener('keydown', e => {
+    const handle = e.target.closest('[data-sort-handle]');
+    if (!handle || handle.dataset.sortHandle !== kind) return;
+    const delta = ['ArrowLeft','ArrowUp'].includes(e.key) ? -1 : ['ArrowRight','ArrowDown'].includes(e.key) ? 1 : 0;
+    if (!delta) return;
+    e.preventDefault();
+    const id = handle.closest('[data-sort-id]').dataset.sortId;
+    if (kind === 'category') { active = id; moveCategory(delta); }
+    else moveItem(id, delta);
+    host.querySelector(`[data-sort-id="${CSS.escape(id)}"] .sort-handle`)?.focus();
+  });
+  host.addEventListener('pointerdown', e => {
+    const handle = e.target.closest('[data-sort-handle]');
+    if (!handle || handle.dataset.sortHandle !== kind || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    if (kind === 'item' && $('search').value.trim()) { notify('请先清空搜索，再拖动物品排序。'); return; }
+    const source = handle.closest('[data-sort-id]');
+    drag = { handle, source, group: source.dataset.sortGroup, startX: e.clientX, startY: e.clientY, moved: false };
+    host.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  host.addEventListener('pointermove', e => {
+    if (!drag || !host.hasPointerCapture(e.pointerId)) return;
+    if (!drag.moved && Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < 7) return;
+    drag.moved = true; drag.source.classList.add('sorting');
+    const target = document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-sort-id]');
+    if (!target || target.parentElement !== host || target === drag.source || target.dataset.sortGroup !== drag.group) return;
+    const r = target.getBoundingClientRect(), s = drag.source.getBoundingClientRect();
+    const sameRow = Math.abs((r.top + r.bottom - s.top - s.bottom) / 2) < r.height * .55;
+    const after = sameRow ? e.clientX > r.left + r.width / 2 : e.clientY > r.top + r.height / 2;
+    target[after ? 'after' : 'before'](drag.source);
+    const edge = 65, pane = document.querySelector('.editor');
+    if (pane && getComputedStyle(pane).overflowY !== 'visible') {
+      const bounds = pane.getBoundingClientRect();
+      if (e.clientY < bounds.top + edge) pane.scrollTop -= 18;
+      else if (e.clientY > bounds.bottom - edge) pane.scrollTop += 18;
+    } else if (e.clientY < edge) window.scrollBy(0, -18);
+    else if (e.clientY > innerHeight - edge) window.scrollBy(0, 18);
+  });
+  function finish(e, cancelled = false) {
+    if (!drag) return;
+    const current = drag; drag = null; current.source.classList.remove('sorting');
+    if (host.hasPointerCapture(e.pointerId)) host.releasePointerCapture(e.pointerId);
+    if (cancelled || !current.moved) { if (cancelled) renderEditor(); return; }
+    const ids = [...host.querySelectorAll(':scope > [data-sort-id]')].map(node => node.dataset.sortId);
+    const before = kind === 'category' ? state.categories.map(c => c.id) : sorted(selected().items).map(i => i.id);
+    if (ids.every((id, i) => id === before[i])) return;
+    if (kind === 'category') commit(s => { const byId = new Map(s.categories.map(c => [c.id, c])); s.categories = ids.map(id => byId.get(id)); }, '分类顺序已调整，可撤销。');
+    else commit(() => { const cat = selected(), byId = new Map(cat.items.map(i => [i.id, i])); cat.items = ids.map(id => byId.get(id)); }, '物品顺序已调整，可撤销。');
+  }
+  host.addEventListener('pointerup', e => finish(e));
+  host.addEventListener('pointercancel', e => finish(e, true));
 }
 const transparentPixel = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
 function field(labelText, control) { return el('div', { class: 'field' }, el('label', { for: control.id, text: labelText }), control); }
@@ -406,6 +461,7 @@ async function restoreFile(file) {
   } catch (e) { notify('导入失败：' + e.message, 8000); }
 }
 function wire() {
+  wireDragSort('categories', 'category'); wireDragSort('itemList', 'item');
   $('undo').onclick = () => { if (!history.length) return; state = history.pop(); $('undo').disabled = !history.length; queueSave(); renderEditor(); scheduleRender(); notify('已撤销上一步修改'); };
   $('addCategory').onclick = () => openCategory(true); $('editCategory').onclick = () => openCategory(); $('addItem').onclick = () => openItem(); $('batchText').onclick = openBatchText;
   $('categoryUp').onclick = () => moveCategory(-1); $('categoryDown').onclick = () => moveCategory(1);
